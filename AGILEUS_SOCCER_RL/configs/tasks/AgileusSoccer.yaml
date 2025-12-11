@@ -1,0 +1,31 @@
+# AGILEUS Task Configuration: Humanoid Soccer Kick
+
+sim:
+  num_envs: 1024
+  dt: 0.005
+  substeps: 2
+
+env:
+  num_observations: 75
+  num_actions: 16
+
+robot:
+  usd_path: "/Isaac/Robots/Humanoid/humanoid_v1.usd"
+  initial_state:
+    pos: [0.0, 0.0, 1.0]
+    joint_pos: {}
+  actuator_model:
+    type: ImplicitActuatorCfg
+
+reward:
+  survival_reward: 0.5
+  upright_penalty: -0.1
+  progress_to_ball_reward: 1.0
+  kick_approach_reward: 2.0
+  goal_score_reward: 50.0
+
+domain_randomization:
+  randomize_mass: True
+  randomize_friction: True
+  randomize_sensor_noise: True
+
