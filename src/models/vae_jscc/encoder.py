@@ -23,17 +23,26 @@ class ResBlock(nn.Module):
 
 
 class FiLMConditioner(nn.Module):
-    """Feature-wise Linear Modulation for SNR conditioning."""
+    """Feature-wise Linear Modulation for SNR conditioning.
+
+    Uses (1 + gamma) * features + beta so the transform starts as identity
+    (gamma≈0, beta≈0 at init) and can never zero out features entirely.
+    """
 
     def __init__(self, snr_embed_dim: int, channels: int) -> None:
         super().__init__()
         self.gamma = nn.Linear(snr_embed_dim, channels)
         self.beta = nn.Linear(snr_embed_dim, channels)
+        # Zero-init so FiLM starts as identity
+        nn.init.zeros_(self.gamma.weight)
+        nn.init.zeros_(self.gamma.bias)
+        nn.init.zeros_(self.beta.weight)
+        nn.init.zeros_(self.beta.bias)
 
     def forward(
         self, features: torch.Tensor, snr_embed: torch.Tensor
     ) -> torch.Tensor:
-        """Apply FiLM: gamma * features + beta.
+        """Apply FiLM: (1 + gamma) * features + beta.
 
         Args:
             features: (B, C, H, W) feature maps.
@@ -44,7 +53,7 @@ class FiLMConditioner(nn.Module):
         """
         gamma = self.gamma(snr_embed).unsqueeze(-1).unsqueeze(-1)
         beta = self.beta(snr_embed).unsqueeze(-1).unsqueeze(-1)
-        return gamma * features + beta
+        return (1 + gamma) * features + beta
 
 
 class Encoder(nn.Module):
@@ -54,6 +63,10 @@ class Encoder(nn.Module):
     to produce mu and log_sigma spatial maps. No linear layers — the latent
     is a spatial feature map, avoiding huge parameter counts.
     """
+
+    # SNR normalization range (matches training config snr_range)
+    SNR_MIN = -5.0
+    SNR_MAX = 25.0
 
     def __init__(
         self,
@@ -73,7 +86,7 @@ class Encoder(nn.Module):
         self.latent_channels = latent_channels
         ch = base_channels
 
-        # SNR embedding MLP
+        # SNR embedding MLP — input is normalized to [0, 1]
         self.snr_mlp = nn.Sequential(
             nn.Linear(1, 64),
             nn.ReLU(inplace=True),
@@ -133,7 +146,9 @@ class Encoder(nn.Module):
             Tuple of (mu, log_sigma), each (B, latent_channels, H/16, W/16).
         """
         B = x.shape[0]
-        snr_t = torch.tensor([[snr_db]], device=x.device, dtype=x.dtype).expand(B, 1)
+        # Normalize SNR from dB to [0, 1] for stable MLP input
+        snr_norm = (snr_db - self.SNR_MIN) / (self.SNR_MAX - self.SNR_MIN)
+        snr_t = torch.tensor([[snr_norm]], device=x.device, dtype=x.dtype).expand(B, 1)
         snr_embed = self.snr_mlp(snr_t)
 
         h = self.down1(x)

@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 
-from src.models.vae_jscc.encoder import FiLMConditioner, ResBlock
+from src.models.vae_jscc.encoder import Encoder, FiLMConditioner, ResBlock
 
 
 class Decoder(nn.Module):
@@ -12,6 +12,10 @@ class Decoder(nn.Module):
     Mirror of the encoder: 1×1 conv to expand channels, then 4 stride-2
     transposed convolution stages with residual blocks. Outputs image in [0, 1].
     """
+
+    # Share SNR normalization range with encoder
+    SNR_MIN = Encoder.SNR_MIN
+    SNR_MAX = Encoder.SNR_MAX
 
     def __init__(
         self,
@@ -30,7 +34,7 @@ class Decoder(nn.Module):
         self.latent_channels = latent_channels
         ch = base_channels
 
-        # SNR embedding MLP (separate from encoder's)
+        # SNR embedding MLP — input is normalized to [0, 1]
         self.snr_mlp = nn.Sequential(
             nn.Linear(1, 64),
             nn.ReLU(inplace=True),
@@ -90,7 +94,9 @@ class Decoder(nn.Module):
             Reconstructed image (B, 3, H_lat*16, W_lat*16) in [0, 1].
         """
         B = z.shape[0]
-        snr_t = torch.tensor([[snr_db]], device=z.device, dtype=z.dtype).expand(B, 1)
+        # Normalize SNR from dB to [0, 1] for stable MLP input
+        snr_norm = (snr_db - self.SNR_MIN) / (self.SNR_MAX - self.SNR_MIN)
+        snr_t = torch.tensor([[snr_norm]], device=z.device, dtype=z.dtype).expand(B, 1)
         snr_embed = self.snr_mlp(snr_t)
 
         h = self.from_latent(z)
