@@ -1,0 +1,9 @@
+[project]
+name = "diffusionjscc-speed"
+version = "0.1.0"
+description = "ML-Based Channel Coding for Continuous-Valued Source Transmission"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"

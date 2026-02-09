@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.egg-info/
+data/
+outputs/
+*.pt
+*.pth
+wandb/
+.vscode/
+.idea/

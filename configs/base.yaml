@@ -1,0 +1,21 @@
+seed: 42
+deterministic: true
+
+data:
+  root: "./data"
+  train_dataset: "div2k"      # div2k or cifar10
+  eval_dataset: "kodak"        # kodak or cifar10
+  batch_size: 16
+  num_workers: 4
+  crop_size: 256               # random crop for training
+
+channel:
+  type: "awgn"                 # awgn or rayleigh
+  snr_db_train: 10.0           # training SNR
+  snr_db_eval: [-5, 0, 5, 10, 15, 20, 25]  # eval sweep
+
+jscc:
+  bandwidth_ratio: 0.25        # k/n, channel uses per source dim
+  power_constraint: 1.0        # average power P
+
+device: "auto"                 # auto, cuda, cpu
