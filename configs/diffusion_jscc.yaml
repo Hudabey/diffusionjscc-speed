@@ -1,0 +1,47 @@
+seed: 42
+deterministic: true
+
+data:
+  root: "./data"
+  train_dataset: "div2k"
+  eval_dataset: "kodak"
+  batch_size: 8
+  num_workers: 4
+  crop_size: 128
+
+channel:
+  type: "awgn"
+  snr_db_eval: [-5, -2, 0, 2, 5, 8, 10, 12, 15, 18, 20, 25]
+
+jscc:
+  bandwidth_ratio: 0.25
+  power_constraint: 1.0
+
+model:
+  type: "diffusion_jscc"
+  in_channels: 6
+  out_channels: 3
+  base_channels: 64
+  channel_mults: [1, 2, 4, 4]
+  num_res_blocks: 2
+  attention_levels: [2]
+  time_embed_dim: 256
+  snr_embed_dim: 256
+  num_timesteps: 1000
+  schedule: "cosine"
+  default_sample_steps: 50
+
+train:
+  epochs: 100
+  batch_size: 8
+  lr: 0.0002
+  weight_decay: 0.01
+  grad_clip: 1.0
+  snr_range: [-5, 25]
+  eval_every: 10
+  crop_size: 128
+
+backbone:
+  checkpoint: "outputs/vae_jscc/ckpt_best.pt"
+
+device: "auto"
