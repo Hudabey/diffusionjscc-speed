@@ -1,0 +1,39 @@
+seed: 42
+deterministic: true
+
+data:
+  root: "./data"
+  train_dataset: "div2k"
+  eval_dataset: "kodak"
+  batch_size: 16
+  num_workers: 4
+  crop_size: 128
+
+channel:
+  type: "awgn"
+  snr_db_train: 10.0
+  snr_db_eval: [-5, -2, 0, 2, 5, 8, 10, 12, 15, 18, 20, 25]
+
+jscc:
+  bandwidth_ratio: 0.25
+  power_constraint: 1.0
+
+model:
+  type: "model_based"
+  latent_channels: 12
+  num_iterations: 6
+  denoiser_channels: 64
+  base_channels: 64
+  snr_embed_dim: 128
+
+train:
+  epochs: 150
+  batch_size: 16
+  lr: 0.0005
+  weight_decay: 0.00001
+  grad_clip: 1.0
+  snr_range: [-5, 25]
+  eval_every: 10
+  save_every: 20
+
+device: "auto"

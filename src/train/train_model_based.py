@@ -1,0 +1,262 @@
+"""Training script for Model-Based JSCC model."""
+
+import argparse
+import time
+from pathlib import Path
+
+import torch
+from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+from src.data.datasets import get_loaders
+from src.eval.metrics import compute_psnr, compute_ssim
+from src.models.model_based.model import ModelBasedJSCC, pad_to_multiple
+from src.utils.config import load_config
+from src.utils.logging import get_logger, log_metrics
+from src.utils.seed import set_seed
+
+
+def get_device(cfg) -> torch.device:
+    """Resolve device from config."""
+    if hasattr(cfg, "device") and cfg.device != "auto":
+        return torch.device(cfg.device)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def save_checkpoint(
+    model: ModelBasedJSCC,
+    optimizer: Adam,
+    epoch: int,
+    best_psnr: float,
+    path: str,
+) -> None:
+    """Save a training checkpoint."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "best_psnr": best_psnr,
+        },
+        path,
+    )
+
+
+@torch.no_grad()
+def evaluate(
+    model: ModelBasedJSCC,
+    dataloader: torch.utils.data.DataLoader,
+    snr_db: float,
+    device: torch.device,
+) -> dict[str, float]:
+    """Evaluate model on a dataset at a fixed SNR.
+
+    Args:
+        model: Model-Based JSCC model.
+        dataloader: Evaluation dataloader (batch_size=1 for variable sizes).
+        snr_db: Channel SNR in dB.
+        device: Torch device.
+
+    Returns:
+        Dict with 'psnr' and 'ssim' averaged over the dataset.
+    """
+    model.eval()
+    all_psnr = []
+    all_ssim = []
+
+    for x in dataloader:
+        if isinstance(x, (list, tuple)):
+            x = x[0]
+        x = x.to(device)
+
+        # Pad to multiple of 8 for the encoder's strided convolutions
+        x_padded = pad_to_multiple(x, 8)
+        x_hat = model(x_padded, snr_db)
+
+        # Crop back to original size
+        x_hat = x_hat[:, :, :x.shape[2], :x.shape[3]]
+        x_hat = x_hat.clamp(0, 1)
+        all_psnr.append(compute_psnr(x, x_hat)["mean"].item())
+        all_ssim.append(compute_ssim(x, x_hat).item())
+
+    model.train()
+    return {
+        "psnr": sum(all_psnr) / len(all_psnr),
+        "ssim": sum(all_ssim) / len(all_ssim),
+    }
+
+
+def train(config_path: str) -> None:
+    """Run Model-Based JSCC training.
+
+    Args:
+        config_path: Path to YAML config file.
+    """
+    cfg = load_config(config_path)
+
+    # Seed for reproducibility
+    set_seed(cfg.seed if hasattr(cfg, "seed") else 42)
+
+    device = get_device(cfg)
+
+    # Output directory
+    out_dir = Path("outputs/model_based")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    logger = get_logger("train_model_based", str(out_dir))
+    metrics_file = str(out_dir / "train_metrics.jsonl")
+
+    # Model config
+    model_cfg = cfg.model if hasattr(cfg, "model") else None
+    latent_channels = getattr(model_cfg, "latent_channels", 12)
+    num_iterations = getattr(model_cfg, "num_iterations", 6)
+    denoiser_channels = getattr(model_cfg, "denoiser_channels", 64)
+    snr_embed_dim = getattr(model_cfg, "snr_embed_dim", 128)
+    base_channels = getattr(model_cfg, "base_channels", 64)
+
+    model = ModelBasedJSCC(
+        latent_channels=latent_channels,
+        num_iterations=num_iterations,
+        denoiser_channels=denoiser_channels,
+        snr_embed_dim=snr_embed_dim,
+        base_channels=base_channels,
+    ).to(device)
+
+    logger.info(f"Model parameters: {model.count_parameters():,}")
+    logger.info(f"Latent channels: {latent_channels}, Iterations: {num_iterations}, Device: {device}")
+
+    # Training config
+    train_cfg = cfg.train if hasattr(cfg, "train") else None
+    epochs = getattr(train_cfg, "epochs", 150)
+    lr = getattr(train_cfg, "lr", 5e-4)
+    weight_decay = getattr(train_cfg, "weight_decay", 1e-5)
+    grad_clip = getattr(train_cfg, "grad_clip", 1.0)
+    snr_range = getattr(train_cfg, "snr_range", [-5, 25])
+    eval_every = getattr(train_cfg, "eval_every", 10)
+    save_every = getattr(train_cfg, "save_every", 20)
+
+    # Override data batch_size from train config if present
+    if train_cfg and hasattr(train_cfg, "batch_size"):
+        cfg.data.batch_size = train_cfg.batch_size
+
+    optimizer = Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
+
+    # Checkpoint resume
+    start_epoch = 0
+    best_psnr = 0.0
+    ckpt_last = out_dir / "ckpt_last.pt"
+    if ckpt_last.exists():
+        logger.info(f"Resuming from {ckpt_last}")
+        ckpt = torch.load(str(ckpt_last), map_location=device, weights_only=True)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        best_psnr = ckpt["best_psnr"]
+        # Advance scheduler to correct position
+        for _ in range(start_epoch):
+            scheduler.step()
+        logger.info(f"Resumed at epoch {start_epoch}, best PSNR={best_psnr:.1f}dB")
+
+    # Data loaders
+    loaders = get_loaders(cfg)
+    train_loader = loaders.train
+    eval_loader = loaders.test
+
+    if train_loader is None:
+        raise RuntimeError("No training data. Check config data.train_dataset.")
+
+    logger.info(f"Train batches: {len(train_loader)}, Eval loader: {eval_loader is not None}")
+    logger.info(f"Epochs: {epochs}, LR: {lr}, SNR range: {snr_range}")
+
+    eval_snrs = [0, 5, 10, 15, 20]
+
+    for epoch in range(start_epoch, epochs):
+        model.train()
+        epoch_loss = 0.0
+        n_batches = 0
+
+        t0 = time.time()
+        for x in train_loader:
+            if isinstance(x, (list, tuple)):
+                x = x[0]
+            x = x.to(device)
+
+            # Random SNR for this batch
+            snr_db = torch.empty(1).uniform_(snr_range[0], snr_range[1]).item()
+
+            x_hat = model(x, snr_db)
+            loss = ModelBasedJSCC.compute_loss(x, x_hat)
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+            optimizer.step()
+
+            epoch_loss += loss.item()
+            n_batches += 1
+
+        scheduler.step()
+        dt = time.time() - t0
+
+        avg_loss = epoch_loss / n_batches
+
+        # Log step sizes
+        step_sizes = model.get_step_sizes()
+        step_str = " ".join(f"{a:.3f}" for a in step_sizes)
+
+        logger.info(
+            f"Epoch {epoch:3d}/{epochs} | loss={avg_loss:.4f} "
+            f"lr={scheduler.get_last_lr()[0]:.6f} "
+            f"alphas=[{step_str}] | {dt:.1f}s"
+        )
+
+        log_metrics(metrics_file, {
+            "epoch": epoch,
+            "loss": avg_loss,
+            "lr": scheduler.get_last_lr()[0],
+            "step_sizes": step_sizes,
+            "time_s": dt,
+        })
+
+        # Validation
+        if eval_loader is not None and (epoch % eval_every == 0 or epoch == epochs - 1):
+            for eval_snr in eval_snrs:
+                metrics = evaluate(model, eval_loader, eval_snr, device)
+                logger.info(
+                    f"  eval SNR={eval_snr:2d}dB | "
+                    f"PSNR={metrics['psnr']:.1f}dB SSIM={metrics['ssim']:.3f}"
+                )
+                log_metrics(metrics_file, {
+                    "epoch": epoch,
+                    "eval_snr_db": eval_snr,
+                    "eval_psnr": metrics["psnr"],
+                    "eval_ssim": metrics["ssim"],
+                })
+
+            # Track best at SNR=10dB
+            mid_snr_metrics = evaluate(model, eval_loader, 10.0, device)
+            if mid_snr_metrics["psnr"] > best_psnr:
+                best_psnr = mid_snr_metrics["psnr"]
+                save_checkpoint(model, optimizer, epoch, best_psnr,
+                                str(out_dir / "ckpt_best.pt"))
+                logger.info(f"  ** New best PSNR={best_psnr:.1f}dB at SNR=10dB **")
+
+        # Periodic save
+        if epoch % save_every == 0:
+            save_checkpoint(model, optimizer, epoch, best_psnr,
+                            str(out_dir / f"ckpt_epoch{epoch}.pt"))
+
+        # Always save latest
+        save_checkpoint(model, optimizer, epoch, best_psnr,
+                        str(out_dir / "ckpt_last.pt"))
+
+    logger.info(f"Training complete. Best PSNR={best_psnr:.1f}dB at SNR=10dB")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train Model-Based JSCC")
+    parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
+    args, _ = parser.parse_known_args()
+    train(args.config)
