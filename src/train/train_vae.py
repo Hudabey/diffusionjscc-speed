@@ -87,8 +87,8 @@ def train(config_path: str) -> None:
     set_seed(cfg.seed if hasattr(cfg, "seed") else 42)
     device = get_device(cfg)
 
-    # Output directory — v2 to keep old results
-    out_dir = Path("outputs/vae_jscc_v2")
+    # Output directory — v3 with per-stage SNR attention
+    out_dir = Path("outputs/vae_jscc_v3")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     logger = get_logger("train_vae", str(out_dir))

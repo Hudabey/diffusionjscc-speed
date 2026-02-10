@@ -36,9 +36,11 @@ class SNRAttention(nn.Module):
     def __init__(self, channels: int) -> None:
         super().__init__()
         self.snr_net = nn.Sequential(
-            nn.Linear(1, 128),
+            nn.Linear(1, 256),
             nn.ReLU(),
-            nn.Linear(128, 128),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
             nn.ReLU(),
         )
         self.gate = nn.Sequential(
@@ -60,8 +62,8 @@ class JSCCEncoder(nn.Module):
     """Fully-convolutional JSCC encoder with SNR-adaptive channel attention.
 
     4 stride-2 downsampling stages (16x spatial reduction) with 5x5 kernels
-    and 2 ResBlocks per stage. No flatten, no linear, no VAE.
-    Inspired by Bourtsoulatze et al. 2019 (DeepJSCC) and ADJSCC.
+    and 2 ResBlocks per stage. SNRAttention applied after every stage so
+    SNR information influences feature extraction at every scale.
     """
 
     def __init__(
@@ -80,6 +82,8 @@ class JSCCEncoder(nn.Module):
             ResBlock(ch),
             ResBlock(ch),
         )
+        self.attn1 = SNRAttention(ch)
+
         # Stage 2: /4
         self.stage2 = nn.Sequential(
             nn.Conv2d(ch, ch * 2, 5, stride=2, padding=2),
@@ -87,6 +91,8 @@ class JSCCEncoder(nn.Module):
             ResBlock(ch * 2),
             ResBlock(ch * 2),
         )
+        self.attn2 = SNRAttention(ch * 2)
+
         # Stage 3: /8
         self.stage3 = nn.Sequential(
             nn.Conv2d(ch * 2, ch * 4, 5, stride=2, padding=2),
@@ -94,6 +100,8 @@ class JSCCEncoder(nn.Module):
             ResBlock(ch * 4),
             ResBlock(ch * 4),
         )
+        self.attn3 = SNRAttention(ch * 4)
+
         # Stage 4: /16
         self.stage4 = nn.Sequential(
             nn.Conv2d(ch * 4, ch * 4, 5, stride=2, padding=2),
@@ -101,12 +109,10 @@ class JSCCEncoder(nn.Module):
             ResBlock(ch * 4),
             ResBlock(ch * 4),
         )
+        self.attn4 = SNRAttention(ch * 4)
 
         # Project to latent channels
         self.to_latent = nn.Conv2d(ch * 4, latent_channels, 1)
-
-        # SNR-adaptive channel attention
-        self.snr_attention = SNRAttention(latent_channels)
 
     def forward(self, x: torch.Tensor, snr_db: float) -> torch.Tensor:
         """Encode image to latent channel symbols.
@@ -118,12 +124,11 @@ class JSCCEncoder(nn.Module):
         Returns:
             Latent feature map (B, latent_channels, H/16, W/16).
         """
-        h = self.stage1(x)
-        h = self.stage2(h)
-        h = self.stage3(h)
-        h = self.stage4(h)
+        h = self.attn1(self.stage1(x), snr_db)
+        h = self.attn2(self.stage2(h), snr_db)
+        h = self.attn3(self.stage3(h), snr_db)
+        h = self.attn4(self.stage4(h), snr_db)
         z = self.to_latent(h)
-        z = self.snr_attention(z, snr_db)
         return z
 
 
