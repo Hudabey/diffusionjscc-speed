@@ -7,7 +7,7 @@ data:
   eval_dataset: "kodak"
   batch_size: 8
   num_workers: 4
-  crop_size: 256
+  crop_size: 128
 
 channel:
   type: "awgn"
@@ -20,20 +20,18 @@ jscc:
 
 model:
   type: "vae_jscc"
-  latent_channels: 192         # rho=1/4: 192 * (256/16)^2 = 49152 = 0.25 * 3 * 256 * 256
-  snr_embed_dim: 256
-  beta_start: 0.0001
-  beta_end: 0.001
-  beta_warmup_epochs: 50
+  latent_channels: 192         # rho=1/4: 192 / (3 * 16^2) = 0.25
+  base_channels: 64
 
 train:
-  epochs: 200
+  epochs: 500
   batch_size: 8
   lr: 0.0001
   weight_decay: 0.00001
   grad_clip: 1.0
-  snr_range: [-5, 25]           # must cover full eval range for SNR conditioning
-  eval_every: 10
-  save_every: 20
+  snr_range: [-2, 20]
+  warmup_epochs: 10
+  eval_every: 25
+  save_every: 50
 
 device: "auto"

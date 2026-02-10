@@ -1,4 +1,4 @@
-"""Evaluation script for trained VAE-JSCC model."""
+"""Evaluation script for trained DeepJSCC model."""
 
 import argparse
 import json
@@ -28,20 +28,10 @@ COLORS = {
 
 
 def load_model(
-    checkpoint_path: str, latent_channels: int, snr_embed_dim: int, device: torch.device
+    checkpoint_path: str, latent_channels: int, base_channels: int, device: torch.device
 ) -> VAEJSCC:
-    """Load a trained VAE-JSCC model from checkpoint.
-
-    Args:
-        checkpoint_path: Path to .pt checkpoint file.
-        latent_channels: Number of latent channels the model was trained with.
-        snr_embed_dim: SNR embedding dimension.
-        device: Torch device.
-
-    Returns:
-        Loaded VAEJSCC model in eval mode.
-    """
-    model = VAEJSCC(latent_channels=latent_channels, snr_embed_dim=snr_embed_dim).to(device)
+    """Load a trained DeepJSCC model from checkpoint."""
+    model = VAEJSCC(latent_channels=latent_channels, base_channels=base_channels).to(device)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
@@ -55,17 +45,7 @@ def evaluate_snr(
     snr_db: float,
     device: torch.device,
 ) -> dict[str, float]:
-    """Evaluate at a single SNR, computing PSNR, SSIM, and LPIPS.
-
-    Args:
-        model: Trained VAE-JSCC model in eval mode.
-        dataloader: Eval dataloader (batch_size=1 for variable sizes).
-        snr_db: Channel SNR in dB.
-        device: Torch device.
-
-    Returns:
-        Dict with 'psnr', 'ssim', 'lpips' averaged over the dataset.
-    """
+    """Evaluate at a single SNR, computing PSNR, SSIM, and LPIPS."""
     all_psnr = []
     all_ssim = []
     all_lpips = []
@@ -98,14 +78,7 @@ def plot_vae_vs_baselines(
     bandwidth_ratio: float,
     output_dir: str,
 ) -> None:
-    """Plot VAE-JSCC vs digital baselines and Shannon bound.
-
-    Args:
-        vae_results: List of VAE eval result dicts with 'snr_db' and 'psnr'.
-        baseline_results_path: Path to M1 baselines results.json.
-        bandwidth_ratio: Bandwidth ratio used.
-        output_dir: Directory to save figures.
-    """
+    """Plot DeepJSCC vs digital baselines and Shannon bound."""
     plt.rcParams.update({
         "font.size": 12,
         "axes.labelsize": 13,
@@ -124,7 +97,7 @@ def plot_vae_vs_baselines(
 
     fig, ax = plt.subplots(figsize=(9, 5.5))
 
-    # VAE-JSCC results
+    # DeepJSCC results
     vae_snrs = sorted([r["snr_db"] for r in vae_results])
     vae_psnrs = [
         next(r["psnr"] for r in vae_results if r["snr_db"] == s) for s in vae_snrs
@@ -132,7 +105,7 @@ def plot_vae_vs_baselines(
     ax.plot(
         vae_snrs, vae_psnrs,
         color=COLORS["vae_jscc"], marker="D", markersize=7,
-        linewidth=2.5, label="VAE-JSCC (ours)", zorder=5,
+        linewidth=2.5, label="DeepJSCC (ours)", zorder=5,
     )
 
     # Load and plot digital baselines
@@ -172,7 +145,7 @@ def plot_vae_vs_baselines(
     rho_frac = f"1/{int(1/bandwidth_ratio)}" if bandwidth_ratio < 1 else str(bandwidth_ratio)
     ax.set_xlabel("Channel SNR (dB)")
     ax.set_ylabel("PSNR (dB)")
-    ax.set_title(f"VAE-JSCC vs Digital Baselines (ρ = {rho_frac})")
+    ax.set_title(f"DeepJSCC vs Digital Baselines ({chr(961)} = {rho_frac})")
     ax.legend(loc="lower right")
     ax.set_xlim(-6, 26)
     ax.set_ylim(bottom=5)
@@ -185,29 +158,25 @@ def plot_vae_vs_baselines(
 
 
 def main(config_path: str) -> None:
-    """Run full VAE-JSCC evaluation sweep.
-
-    Args:
-        config_path: Path to YAML config file.
-    """
+    """Run full DeepJSCC evaluation sweep."""
     cfg = load_config(config_path)
     set_seed(cfg.seed if hasattr(cfg, "seed") else 42)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model_cfg = cfg.model if hasattr(cfg, "model") else None
-    latent_channels = model_cfg.latent_channels if model_cfg and hasattr(model_cfg, "latent_channels") else 192
-    snr_embed_dim = model_cfg.snr_embed_dim if model_cfg else 256
+    latent_channels = getattr(model_cfg, "latent_channels", 192)
+    base_channels = getattr(model_cfg, "base_channels", 64)
 
-    # Load best checkpoint
-    ckpt_path = "outputs/vae_jscc/ckpt_best.pt"
+    # Load best checkpoint from v2 dir
+    ckpt_path = "outputs/vae_jscc_v2/ckpt_best.pt"
     if not Path(ckpt_path).exists():
-        ckpt_path = "outputs/vae_jscc/ckpt_last.pt"
+        ckpt_path = "outputs/vae_jscc_v2/ckpt_last.pt"
 
     logger = get_logger("eval_vae")
     logger.info(f"Loading checkpoint from {ckpt_path}")
 
-    model = load_model(ckpt_path, latent_channels, snr_embed_dim, device)
+    model = load_model(ckpt_path, latent_channels, base_channels, device)
     logger.info(f"Model loaded: {model.count_parameters():,} params")
 
     # Eval dataloader
@@ -228,7 +197,7 @@ def main(config_path: str) -> None:
             "ssim": metrics["ssim"],
             "lpips": metrics["lpips"],
             "bandwidth_ratio": bandwidth_ratio,
-            "model": "vae_jscc",
+            "model": "deepjscc_v2",
             "latent_channels": latent_channels,
         }
         results.append(result)
@@ -238,7 +207,7 @@ def main(config_path: str) -> None:
         )
 
     # Save results
-    out_dir = Path("outputs/vae_jscc")
+    out_dir = Path("outputs/vae_jscc_v2")
     out_dir.mkdir(parents=True, exist_ok=True)
     results_path = out_dir / "eval_results.json"
     with open(results_path, "w") as f:
@@ -253,7 +222,7 @@ def main(config_path: str) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate VAE-JSCC")
+    parser = argparse.ArgumentParser(description="Evaluate DeepJSCC")
     parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
     args, _ = parser.parse_known_args()
     main(args.config)

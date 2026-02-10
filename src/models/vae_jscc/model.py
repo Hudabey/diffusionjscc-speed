@@ -1,4 +1,7 @@
-"""VAE-JSCC: full model combining encoder, channel, and decoder."""
+"""DeepJSCC: fully-convolutional autoencoder JSCC (no VAE components).
+
+Named VAEJSCC for backward compatibility with downstream code (diffusion model).
+"""
 
 import torch
 import torch.nn as nn
@@ -6,8 +9,8 @@ import torch.nn.functional as F
 
 from src.channel.awgn import awgn_channel
 from src.channel.utils import normalize_power
-from src.models.vae_jscc.decoder import Decoder
-from src.models.vae_jscc.encoder import Encoder
+from src.models.vae_jscc.decoder import JSCCDecoder
+from src.models.vae_jscc.encoder import JSCCEncoder
 
 
 def pad_to_multiple(x: torch.Tensor, multiple: int) -> torch.Tensor:
@@ -29,14 +32,11 @@ def pad_to_multiple(x: torch.Tensor, multiple: int) -> torch.Tensor:
 
 
 class VAEJSCC(nn.Module):
-    """VAE-based Joint Source-Channel Coding.
+    """DeepJSCC-style fully-convolutional JSCC.
 
-    Fully convolutional architecture: encoder produces spatial latent maps
-    (mu, log_sigma), which are flattened for power normalization and AWGN
-    channel transmission, then reshaped back for the decoder.
-
-    The latent is a spatial feature map, not a flat vector, which avoids
-    huge linear layers and naturally handles variable input sizes.
+    Despite the class name (kept for backward compatibility), this is NOT a VAE.
+    It is a clean autoencoder: encoder -> power normalize -> AWGN -> decoder.
+    No mu/log_sigma, no reparameterization, no KL divergence.
     """
 
     def __init__(
@@ -45,103 +45,85 @@ class VAEJSCC(nn.Module):
         snr_embed_dim: int = 256,
         base_channels: int = 64,
     ) -> None:
-        """Initialize VAE-JSCC.
+        """Initialize DeepJSCC.
 
         Args:
             latent_channels: Number of latent channels. Controls bandwidth ratio:
-                rho = latent_channels / (3 * 16^2) for the standard 4-stage encoder.
-                E.g., 192 channels with 256x256 input → latent_dim = 192*16*16 = 49152,
-                rho = 49152 / (3*256*256) = 1/4.
-            snr_embed_dim: Dimension of SNR embedding for FiLM conditioning.
+                rho = latent_channels / (3 * 16^2).
+            snr_embed_dim: Accepted for backward compatibility (unused).
             base_channels: Base channel count for conv layers.
         """
         super().__init__()
         self.latent_channels = latent_channels
-        self.encoder = Encoder(latent_channels, snr_embed_dim, base_channels)
-        self.decoder = Decoder(latent_channels, snr_embed_dim, base_channels)
-
-    @staticmethod
-    def reparameterize(
-        mu: torch.Tensor, log_sigma: torch.Tensor
-    ) -> torch.Tensor:
-        """Reparameterization trick: z = mu + sigma * epsilon.
-
-        Args:
-            mu: Mean of the latent distribution (any shape).
-            log_sigma: Log standard deviation (same shape as mu).
-
-        Returns:
-            Sampled latent tensor (same shape as mu).
-        """
-        std = torch.exp(0.5 * log_sigma)
-        eps = torch.randn_like(std)
-        return mu + std * eps
+        self.encoder = JSCCEncoder(latent_channels, base_channels)
+        self.decoder = JSCCDecoder(latent_channels, base_channels)
 
     def forward(
         self,
         x: torch.Tensor,
         snr_db: float,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Full forward pass: encode → reparameterize → channel → decode.
+    ) -> tuple[torch.Tensor, torch.Tensor, None]:
+        """Full forward pass: encode -> power normalize -> channel -> decode.
 
         Args:
             x: Input images (B, 3, H, W) in [0, 1]. H, W must be divisible by 16.
             snr_db: Channel SNR in dB (scalar).
 
         Returns:
-            Tuple of (x_hat, mu_flat, log_sigma_flat).
+            Tuple of (x_hat, z, None).
             x_hat: Reconstructed images (B, 3, H, W) in [0, 1].
-            mu_flat, log_sigma_flat: Flattened latent parameters (B, k).
+            z: Latent channel symbols (B, k) flattened, after power normalization.
+            None: Placeholder for backward compatibility.
         """
-        # Encode → spatial latent maps
-        mu_map, logsig_map = self.encoder(x, snr_db)
-        spatial_shape = mu_map.shape  # (B, C_lat, H_lat, W_lat)
+        # Encode
+        z_spatial = self.encoder(x, snr_db)
+        spatial_shape = z_spatial.shape
 
-        # Flatten for reparameterization, power norm, and channel
-        mu = mu_map.flatten(1)
-        log_sigma = logsig_map.flatten(1)
-
-        if self.training:
-            z = self.reparameterize(mu, log_sigma)
-        else:
-            z = mu  # Use mean at eval time for deterministic output
-
+        # Power normalize
+        z = z_spatial.flatten(1)
         z = normalize_power(z, target_power=1.0, mode="per_sample")
+
+        # AWGN channel
         z_noisy, _ = awgn_channel(z, snr_db)
 
-        # Reshape back to spatial map for decoder
-        z_spatial = z_noisy.view(spatial_shape)
-        x_hat = self.decoder(z_spatial, snr_db)
+        # Reshape back and decode
+        z_noisy_spatial = z_noisy.view(spatial_shape)
+        x_hat = self.decoder(z_noisy_spatial, snr_db)
 
-        return x_hat, mu, log_sigma
+        return x_hat, z, None
 
     @staticmethod
     def compute_loss(
         x: torch.Tensor,
         x_hat: torch.Tensor,
-        mu: torch.Tensor,
-        log_sigma: torch.Tensor,
-        beta: float = 0.001,
+        z: torch.Tensor | None = None,
+        log_sigma: torch.Tensor | None = None,
+        beta: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Compute VAE loss: reconstruction + beta * KL divergence.
+        """Compute MSE + MS-SSIM combined loss. No KL.
 
         Args:
             x: Original images (B, 3, H, W).
             x_hat: Reconstructed images (B, 3, H, W).
-            mu: Latent mean (B, k).
-            log_sigma: Latent log std (B, k).
-            beta: Weight for KL divergence. Keep small (0.0001–0.01)
-                since this is a reconstruction model, not generative.
+            z: Ignored (backward compat).
+            log_sigma: Ignored (backward compat).
+            beta: Ignored (backward compat).
 
         Returns:
-            Tuple of (total_loss, recon_loss, kl_loss).
+            Tuple of (total_loss, mse_loss, msssim_loss).
         """
-        recon_loss = F.mse_loss(x_hat, x, reduction="mean")
-        kl_loss = -0.5 * torch.mean(
-            1 + log_sigma - mu.pow(2) - log_sigma.exp()
-        )
-        total_loss = recon_loss + beta * kl_loss
-        return total_loss, recon_loss, kl_loss
+        mse = F.mse_loss(x_hat, x, reduction="mean")
+        try:
+            from pytorch_msssim import ms_ssim
+            msssim_val = ms_ssim(
+                x_hat.clamp(0, 1), x, data_range=1.0, size_average=True,
+                win_size=7, weights=[0.0448, 0.2856, 0.3001, 0.2363],
+            )
+            msssim_loss = 1.0 - msssim_val
+        except Exception:
+            msssim_loss = torch.tensor(0.0, device=x.device)
+        loss = 0.7 * mse + 0.3 * msssim_loss
+        return loss, mse, msssim_loss
 
     def count_parameters(self) -> int:
         """Return total number of trainable parameters."""
