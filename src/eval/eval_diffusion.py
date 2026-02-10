@@ -65,7 +65,7 @@ def load_diffusion_pipeline(cfg, device) -> DiffusionJSCC:
 
 
 @torch.no_grad()
-def evaluate_snr_steps(pipeline, dataloader, snr_db, num_steps, device):
+def evaluate_snr_steps(pipeline, dataloader, snr_db, num_steps, device, t_start=25):
     """Evaluate at given SNR and step count."""
     psnr_ref, ssim_ref, lpips_ref = [], [], []
     psnr_ini = []
@@ -77,7 +77,7 @@ def evaluate_snr_steps(pipeline, dataloader, snr_db, num_steps, device):
         x = x.to(device)
 
         t0 = time.time()
-        x_refined, x_init = pipeline.sample(x, snr_db, num_steps=num_steps)
+        x_refined, x_init = pipeline.sample(x, snr_db, num_steps=num_steps, t_start=t_start)
         total_time += time.time() - t0
 
         h, w = x.shape[2], x.shape[3]
@@ -210,13 +210,14 @@ def main(config_path: str) -> None:
     eval_loader = loaders.test
 
     snr_list = [-5, -2, 0, 2, 5, 8, 10, 12, 15, 18, 20, 25]
-    step_list = [1, 2, 5, 10, 25, 50]
+    step_list = [1, 2, 5, 10]
+    t_start = model_cfg.default_t_start if model_cfg and hasattr(model_cfg, "default_t_start") else 25
     bandwidth_ratio = cfg.jscc.bandwidth_ratio if hasattr(cfg, "jscc") else 0.25
 
     results = []
     for snr in snr_list:
         for steps in step_list:
-            metrics = evaluate_snr_steps(pipeline, eval_loader, snr, steps, device)
+            metrics = evaluate_snr_steps(pipeline, eval_loader, snr, steps, device, t_start=t_start)
             result = {
                 "snr_db": snr, "num_steps": steps, "bandwidth_ratio": bandwidth_ratio,
                 **metrics,

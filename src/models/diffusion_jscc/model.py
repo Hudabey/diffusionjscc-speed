@@ -92,7 +92,8 @@ class DiffusionJSCC(nn.Module):
 
     @torch.no_grad()
     def sample(
-        self, x: torch.Tensor, snr_db: float, num_steps: int = 50
+        self, x: torch.Tensor, snr_db: float, num_steps: int = 5,
+        t_start: int = 200,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Full pipeline: VAE-JSCC → diffusion refinement.
 
@@ -100,6 +101,7 @@ class DiffusionJSCC(nn.Module):
             x: Input images (B, 3, H, W) in [0, 1].
             snr_db: Channel SNR in dB.
             num_steps: Number of DDIM sampling steps.
+            t_start: Starting timestep for refinement (lower = lighter refinement).
 
         Returns:
             Tuple of (x_refined, x_init).
@@ -107,5 +109,8 @@ class DiffusionJSCC(nn.Module):
             x_init: VAE-JSCC initial reconstruction (B, 3, H, W).
         """
         x_init = self.get_vae_reconstruction(x, snr_db)
-        x_refined = ddim_sample(self.diffusion, x_init, snr_db, num_steps=num_steps)
+        x_refined = ddim_sample(
+            self.diffusion, x_init, snr_db,
+            num_steps=num_steps, t_start=t_start,
+        )
         return x_refined, x_init

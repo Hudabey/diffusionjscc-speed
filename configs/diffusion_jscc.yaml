@@ -29,7 +29,8 @@ model:
   snr_embed_dim: 256
   num_timesteps: 1000
   schedule: "cosine"
-  default_sample_steps: 50
+  default_sample_steps: 1
+  default_t_start: 25
 
 train:
   epochs: 100

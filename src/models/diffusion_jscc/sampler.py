@@ -10,14 +10,16 @@ def ddim_sample(
     diffusion: GaussianDiffusion,
     x_init: torch.Tensor,
     snr_db: float,
-    num_steps: int = 50,
+    num_steps: int = 5,
     eta: float = 0.0,
+    t_start: int = 200,
 ) -> torch.Tensor:
-    """DDIM sampling starting from noisy x_init.
+    """DDIM sampling starting from lightly-noised x_init.
 
-    Starts from x_init with added noise (not pure noise), then iteratively
-    denoises. Even 1 step gives a reasonable result since x_init is already
-    a decent reconstruction.
+    The VAE-JSCC reconstruction x_init is already a decent image (~24dB PSNR).
+    We add a small amount of noise corresponding to timestep t_start, then
+    denoise from t_start→0 in num_steps DDIM steps. This provides light
+    refinement rather than full generation from noise.
 
     Args:
         diffusion: GaussianDiffusion model (with UNet and schedule).
@@ -25,42 +27,44 @@ def ddim_sample(
         snr_db: Channel SNR in dB (scalar).
         num_steps: Number of DDIM sampling steps.
         eta: Stochasticity (0=deterministic DDIM, 1=DDPM).
+        t_start: Starting timestep (lower = less noise added to x_init).
 
     Returns:
         Refined image (B, C, H, W) in [0, 1].
     """
     device = x_init.device
     B = x_init.shape[0]
-    T = diffusion.T
 
-    # Create evenly spaced timestep subsequence
-    step_indices = torch.linspace(T - 1, 0, num_steps + 1, device=device).long()
+    # Clamp t_start to valid range
+    t_start = min(t_start, diffusion.T - 1)
 
-    # Start from x_init with noise scaled by a timestep partway through the schedule
-    # Use the first timestep in our subsequence to determine noise level
-    t_start = step_indices[0]
+    # Create evenly spaced timestep subsequence from t_start down to 0
+    step_indices = torch.linspace(t_start, 0, num_steps + 1, device=device).long()
+
+    # Add noise to x_init at level t_start (light corruption, not pure noise)
+    t_batch = step_indices[0].expand(B)
     noise = torch.randn_like(x_init)
-    x_t = diffusion.q_sample(x_init, t_start.expand(B), noise)
+    x_t = diffusion.q_sample(x_init, t_batch, noise)
 
     for i in range(num_steps):
         t_cur = step_indices[i]
         t_next = step_indices[i + 1]
-
-        t_batch = t_cur.expand(B)
+        t_b = t_cur.expand(B)
 
         # Predict noise
-        noise_pred = diffusion.unet(x_t, x_init, t_batch, snr_db)
+        noise_pred = diffusion.unet(x_t, x_init, t_b, snr_db)
 
         # Current and next alpha_cumprod
         alpha_cur = diffusion.alphas_cumprod[t_cur]
-        alpha_next = diffusion.alphas_cumprod[t_next]
+        alpha_next = diffusion.alphas_cumprod[t_next] if t_next > 0 else torch.tensor(1.0, device=device)
 
         # Predicted x_0
         x0_pred = (x_t - torch.sqrt(1 - alpha_cur) * noise_pred) / torch.sqrt(alpha_cur)
         x0_pred = x0_pred.clamp(0, 1)
 
-        # DDIM step
-        if eta > 0 and i < num_steps - 1:
+        if t_next == 0:
+            x_t = x0_pred
+        elif eta > 0:
             sigma = (
                 eta
                 * torch.sqrt((1 - alpha_next) / (1 - alpha_cur))

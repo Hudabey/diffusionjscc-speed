@@ -42,7 +42,7 @@ def save_checkpoint(model, optimizer, epoch, best_psnr, path):
 
 
 @torch.no_grad()
-def evaluate(pipeline, dataloader, snr_db, device, num_steps=10):
+def evaluate(pipeline, dataloader, snr_db, device, num_steps=1, t_start=25):
     """Evaluate diffusion pipeline on a dataset at fixed SNR.
 
     Args:
@@ -63,7 +63,7 @@ def evaluate(pipeline, dataloader, snr_db, device, num_steps=10):
             x = x[0]
         x = x.to(device)
 
-        x_refined, x_init = pipeline.sample(x, snr_db, num_steps=num_steps)
+        x_refined, x_init = pipeline.sample(x, snr_db, num_steps=num_steps, t_start=t_start)
 
         # Crop to original size if padded
         h, w = x.shape[2], x.shape[3]
@@ -74,6 +74,10 @@ def evaluate(pipeline, dataloader, snr_db, device, num_steps=10):
         ssim_ref.append(compute_ssim(x, x_refined).item())
         psnr_ini.append(compute_psnr(x, x_init)["mean"].item())
         ssim_ini.append(compute_ssim(x, x_init).item())
+
+        del x_refined, x_init
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     return {
         "psnr_refined": sum(psnr_ref) / len(psnr_ref),
@@ -137,6 +141,18 @@ def train(config_path: str) -> None:
     optimizer = AdamW(diffusion.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
 
+    # Resume from checkpoint if available
+    start_epoch = 0
+    resume_path = out_dir / "ckpt_last.pt"
+    if resume_path.exists():
+        ckpt = torch.load(str(resume_path), map_location=device, weights_only=True)
+        diffusion.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        for _ in range(start_epoch):
+            scheduler.step()
+        logger.info(f"Resumed from epoch {ckpt['epoch']}, best PSNR={ckpt.get('best_psnr', 0):.1f}dB")
+
     loaders = get_loaders(cfg)
     train_loader = loaders.train
     eval_loader = loaders.test
@@ -145,9 +161,11 @@ def train(config_path: str) -> None:
     logger.info(f"LR: {lr}, SNR range: {snr_range}, Crop: {crop_size}")
 
     best_psnr = 0.0
+    if resume_path.exists():
+        best_psnr = ckpt.get("best_psnr", 0.0)
     eval_snrs = [0, 10, 20]
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, epochs):
         diffusion.train()
         epoch_loss = 0.0
         n_batches = 0
@@ -186,8 +204,11 @@ def train(config_path: str) -> None:
         # Evaluation
         if eval_loader is not None and (epoch % eval_every == 0 or epoch == epochs - 1):
             diffusion.eval()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            mid_psnr = None
             for snr in eval_snrs:
-                metrics = evaluate(pipeline, eval_loader, snr, device, num_steps=10)
+                metrics = evaluate(pipeline, eval_loader, snr, device)
                 logger.info(
                     f"  SNR={snr:2d}dB | init PSNR={metrics['psnr_init']:.1f} "
                     f"→ refined PSNR={metrics['psnr_refined']:.1f} "
@@ -199,11 +220,12 @@ def train(config_path: str) -> None:
                     "psnr_refined": metrics["psnr_refined"],
                     "ssim_refined": metrics["ssim_refined"],
                 })
+                if snr == 10:
+                    mid_psnr = metrics["psnr_refined"]
 
             # Track best at SNR=10
-            mid = evaluate(pipeline, eval_loader, 10.0, device, num_steps=10)
-            if mid["psnr_refined"] > best_psnr:
-                best_psnr = mid["psnr_refined"]
+            if mid_psnr is not None and mid_psnr > best_psnr:
+                best_psnr = mid_psnr
                 save_checkpoint(pipeline, optimizer, epoch, best_psnr,
                                 str(out_dir / "ckpt_best.pt"))
                 logger.info(f"  ** New best refined PSNR={best_psnr:.1f}dB **")

@@ -92,11 +92,12 @@ class SelfAttention(nn.Module):
         qkv = self.qkv(h).reshape(B, 3, self.num_heads, C // self.num_heads, H * W)
         q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
 
-        # Scaled dot-product attention
-        scale = (C // self.num_heads) ** -0.5
-        attn = torch.einsum("bhdn,bhdm->bhnm", q, k) * scale
-        attn = attn.softmax(dim=-1)
-        out = torch.einsum("bhnm,bhdm->bhdn", attn, v)
+        # (B, heads, head_dim, N) -> (B, heads, N, head_dim) for SDPA
+        q = q.permute(0, 1, 3, 2)
+        k = k.permute(0, 1, 3, 2)
+        v = v.permute(0, 1, 3, 2)
+        out = F.scaled_dot_product_attention(q, k, v)
+        out = out.permute(0, 1, 3, 2)  # back to (B, heads, head_dim, N)
 
         out = out.reshape(B, C, H, W)
         return x + self.proj(out)
