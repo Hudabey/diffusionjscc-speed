@@ -1,10 +1,30 @@
 __pycache__/
 *.pyc
+*.pyo
 *.egg-info/
-data/
-outputs/
-*.pt
-*.pth
-wandb/
+.DS_Store
 .vscode/
 .idea/
+wandb/
+
+# Data (too large for git)
+data/
+
+# Model weights (too large for git)
+*.pt
+*.pth
+outputs/vae_jscc/
+outputs/vae_jscc_v2/
+outputs/vae_jscc_v3/
+outputs/model_based/
+outputs/diffusion_jscc/
+outputs/baselines/
+
+# Keep evaluation results and figures
+!outputs/evaluation/
+!outputs/evaluation/figures/
+!outputs/evaluation/all_results.json
+!outputs/evaluation/results_table.md
+!outputs/evaluation/results_table.tex
+!outputs/evaluation/convergence.json
+!outputs/evaluation/comprehensive_eval.log

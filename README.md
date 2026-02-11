@@ -1,163 +1,144 @@
-# DiffusionJSCC-Speed
+# DiffusionJSCC-Speed: Deep Joint Source-Channel Coding for Robust Image Transmission
 
-**Deep Joint Source-Channel Coding for Robust Image Transmission over Noisy Channels**
-
-Three learned JSCC approaches — convolutional autoencoder, diffusion-based refinement, and model-based unrolled decoding — compared against digital baselines on a unified codebase.
+> Three learned JSCC approaches — DeepJSCC, Model-Based, and Diffusion-Enhanced — demonstrating graceful degradation over noisy channels where digital baselines catastrophically fail.
 
 ## Key Results
 
+**+13 dB advantage over digital transmission at SNR = 0 dB on the Kodak dataset.**
+
+| Method | Params | SNR=0 dB | SNR=10 dB | SNR=20 dB | Latency |
+|--------|--------|----------|-----------|-----------|---------|
+| JPEG + Ideal Code | — | 12.2 dB | 26.5 dB | 34.1 dB | — |
+| WebP + Ideal Code | — | 12.2 dB | 26.2 dB | 36.7 dB | — |
+| **DeepJSCC (Ours)** | 17.5M | **25.2 dB** | 25.8 dB | 25.8 dB | ~10 ms |
+| **Model-Based (Ours)** | 2.6M | 22.2 dB | 23.8 dB | 23.6 dB | ~8 ms |
+
 ![PSNR vs SNR](outputs/evaluation/figures/psnr_vs_snr_all_methods.png)
 
-*Learned JSCC achieves graceful degradation while digital baselines exhibit cliff effect.*
+## The Problem: Cliff Effect in Digital Transmission
 
-| Method | Params | SNR = 0 dB | SNR = 10 dB | SNR = 20 dB |
-|--------|--------|------------|-------------|-------------|
-| JPEG + Ideal Code | — | 12.2 dB | 26.5 dB | 34.1 dB |
-| WebP + Ideal Code | — | 12.2 dB | 26.2 dB | 36.7 dB |
-| **DeepJSCC (Ours)** | **17.5M** | **25.2 dB** | **25.8 dB** | 25.8 dB |
-| Model-Based (Ours) | 2.6M | 22.2 dB | 23.8 dB | 23.6 dB |
+Traditional digital communication (compress → channel code → modulate) works perfectly above a threshold SNR, but **fails catastrophically** below it — producing unintelligible noise. This "cliff effect" is a fundamental limitation of separation-based design.
 
-- **+13 dB over digital at SNR = 0 dB** — graceful degradation vs. total failure
-- **6.6x parameter efficiency** — model-based approach achieves competitive quality with 2.6M params
+![Cliff Effect](outputs/evaluation/figures/cliff_effect_annotated.png)
 
-## Methods
+## Our Approach: Three JSCC Paradigms
 
-### DeepJSCC with SNR-Adaptive Attention
+### 1. DeepJSCC — Fully-Convolutional Joint Source-Channel Coding
+- 4-stage encoder/decoder with 16× spatial downsampling
+- SNR-adaptive channel attention for conditional encoding
+- Loss: 0.7·MSE + 0.3·(1 − MS-SSIM)
+- **Result**: Graceful degradation, +13 dB over digital at low SNR
 
-Fully-convolutional autoencoder with 4 stride-2 stages (16x spatial reduction). SNR-adaptive channel attention gates features based on channel quality. Trained with combined MSE + MS-SSIM loss on DIV2K.
+### 2. Model-Based JSCC — Unrolled Iterative Decoding
+*Inspired by Shlezinger et al. (2021) "Model-Based Deep Learning"*
+- Shannon-Kotel'nikov encoder with built-in power normalization
+- Unrolled decoder: K=6 iterations of model-based gradient + learned denoiser
+- Learned step sizes provide interpretability
+- **Result**: Competitive quality with **6.6× fewer parameters** (2.6M vs 17.5M)
 
-### Model-Based JSCC
+### 3. Diffusion-Enhanced JSCC — Receiver-Side Refinement
+- Conditional DDPM (17.5M param UNet) refines DeepJSCC output
+- DDIM sampling for configurable quality-latency tradeoff
+- **Status**: Architecture complete; needs retraining on updated backbone (see Known Limitations)
 
-Shannon-Kotel'nikov inspired encoder with unrolled iterative decoder (K=6 gradient + denoiser steps). Exploits known AWGN channel model for analytical gradient computation, achieving competitive results with 6.6x fewer parameters.
+## Parameter Efficiency
 
-### Diffusion-Based Receiver
+![Parameter Efficiency](outputs/evaluation/figures/param_efficiency.png)
 
-Conditional DDPM refines initial DeepJSCC output. UNet conditioned on reconstruction + SNR. DDIM sampling enables quality-latency tradeoff. (Trained on v1 backbone; retraining on v2 is future work.)
+The model-based approach achieves competitive reconstruction quality while using 6.6× fewer parameters — demonstrating that communication-theoretic structure (unrolled optimization, S-K mappings) can replace brute-force model capacity.
 
-### Digital Baselines
+## Model-Based Decoder Convergence
 
-JPEG and WebP compression paired with ideal capacity-achieving channel codes. Demonstrates the cliff effect — total failure below ~8 dB SNR threshold.
+![Convergence](outputs/evaluation/figures/model_based_convergence.png)
+
+PSNR improves from 10.1 dB (K=1) to 23.8 dB (K=6), showing that the unrolled iterative structure is essential — each iteration meaningfully refines the reconstruction.
+
+## Visual Comparison
+
+![Visual Comparison](outputs/evaluation/figures/visual_comparison.png)
 
 ## Quick Start
 
 ```bash
-# Setup
+# Clone
+git clone https://github.com/Hudabey/diffusionjscc-speed.git
+cd diffusionjscc-speed
+
+# Install dependencies
 pip install -r requirements.txt
-bash scripts/setup_pod.sh
 
-# Download datasets (DIV2K + Kodak)
-# Datasets expected in ./data/DIV2K/ and ./data/kodak/
-
-# Evaluate pretrained models
+# Run evaluation (requires trained models in outputs/)
 python -m src.eval.comprehensive_eval
 
-# Generate figures
-python -m src.eval.generate_figures
+# Train DeepJSCC from scratch
+python -m src.train.train_vae --config configs/vae_jscc.yaml
 
-# Train from scratch
-bash scripts/run_train_vae.sh          # DeepJSCC (~500 epochs, ~4h on RTX 5090)
-bash scripts/run_train_model_based.sh  # Model-Based (~60 epochs, ~1h)
-bash scripts/run_train_diffusion.sh    # Diffusion refinement
+# Train Model-Based JSCC
+python -m src.train.train_model_based --config configs/model_based.yaml
+
+# Run tests
+python -m pytest tests/ -v  # 79 tests
 ```
 
 ## Project Structure
 
 ```
 diffusionjscc-speed/
-├── configs/                    # YAML configuration files
-│   ├── base.yaml              # Shared defaults
-│   ├── vae_jscc.yaml          # DeepJSCC config
-│   ├── model_based.yaml       # Model-Based JSCC config
-│   └── diffusion_jscc.yaml    # Diffusion JSCC config
+├── configs/                    # YAML configurations for all models
+│   ├── base.yaml
+│   ├── vae_jscc.yaml
+│   ├── diffusion_jscc.yaml
+│   └── model_based.yaml
 ├── src/
+│   ├── channel/                # AWGN & Rayleigh channel models
+│   ├── data/                   # Kodak, DIV2K, CIFAR-10 data pipeline
+│   ├── eval/                   # Evaluation & figure generation
 │   ├── models/
-│   │   ├── vae_jscc/          # DeepJSCC encoder/decoder/model
-│   │   ├── model_based/       # S-K encoder + unrolled decoder
-│   │   └── diffusion_jscc/    # Conditional DDPM + UNet
-│   ├── channel/               # AWGN and Rayleigh channel models
-│   ├── data/                  # Dataset loaders and transforms
-│   ├── eval/                  # Evaluation scripts and metrics
-│   ├── train/                 # Training loops
-│   └── utils/                 # Config loading, logging, seeds
-├── scripts/                   # Training and setup shell scripts
-├── tests/                     # Unit tests (79 tests)
-├── report/                    # Technical report
-├── outputs/
-│   ├── vae_jscc_v2/          # Trained DeepJSCC checkpoints
-│   ├── model_based/          # Trained Model-Based checkpoints
-│   ├── baselines/            # Digital baseline results
-│   └── evaluation/           # All results, figures, tables
-└── data/                      # DIV2K (train) + Kodak (eval)
+│   │   ├── vae_jscc/           # DeepJSCC encoder/decoder
+│   │   ├── diffusion_jscc/     # Conditional DDPM + DDIM sampler
+│   │   └── model_based/        # S-K encoder + unrolled decoder
+│   ├── train/                  # Training scripts
+│   └── utils/                  # Config, seeding, logging
+├── tests/                      # 79 unit tests
+├── report/                     # Technical report (workshop-paper format)
+├── outputs/                    # Trained models, results, figures
+└── scripts/                    # Training launch scripts
 ```
 
-## Results
+## Known Limitations
 
-### Graceful Degradation vs. Cliff Effect
+- **Weak SNR adaptation**: PSNR only varies ~1 dB from SNR=0 to SNR=20 (should be ~7 dB). The channel attention gating doesn't differentiate strongly enough. Transformer-based spatial modulation (as in SwinJSCC) would address this.
+- **High-SNR gap**: Digital baselines outperform at SNR > 10 dB due to the SNR adaptation limitation.
+- **Diffusion incompatibility**: The diffusion model was trained on v1 backbone (VAE with FiLM) but the current backbone is v2 (deterministic with SNRAttention). Needs retraining.
+- **Training data scale**: Trained on DIV2K (800 images). ImageNet-scale data would improve generalization.
 
-![Cliff Effect](outputs/evaluation/figures/cliff_effect_annotated.png)
+## Future Directions
 
-Digital baselines fail completely below SNR ~ 8 dB. Learned JSCC methods degrade smoothly — producing usable images even at SNR = -5 dB.
-
-### Parameter Efficiency
-
-![Parameter Efficiency](outputs/evaluation/figures/param_efficiency.png)
-
-Model-Based JSCC achieves 92% of DeepJSCC quality with 15% of the parameters, enabled by exploiting the known AWGN channel model.
-
-### Iterative Decoder Convergence
-
-![Convergence](outputs/evaluation/figures/model_based_convergence.png)
-
-The unrolled decoder improves from 10.1 dB (K=1) to 23.8 dB (K=6), with each iteration refining the reconstruction using learned step sizes and denoisers.
-
-### Inference Latency
-
-![Latency](outputs/evaluation/figures/latency_comparison.png)
-
-Both methods achieve < 12 ms end-to-end on an RTX 5090, suitable for real-time applications.
-
-### Visual Comparison
-
-![Visual Comparison](outputs/evaluation/figures/visual_comparison.png)
-
-### Known Limitations
-
-- **Weak SNR adaptation**: only ~2 dB PSNR variation across 30 dB SNR range (should be ~7-10 dB)
-- **High-SNR gap**: digital baselines outperform learned methods above SNR = 12 dB
-- **Diffusion module**: needs retraining on updated DeepJSCC v2 backbone
-
-See the [technical report](report/report.md) for detailed analysis and discussion.
+1. **Swin Transformer backbone** for stronger multi-scale feature extraction
+2. **Learned rate adaptation** — variable bandwidth ratio within a single model
+3. **Rayleigh fading channels** with CSI estimation
+4. **Consistency distillation** for single-step diffusion refinement
+5. **Model-based diffusion hybrid** combining unrolled decoder with generative refinement
 
 ## Technical Report
 
-The full technical report is available at [report/report.md](report/report.md), structured as a workshop paper covering system model, methods, experimental results, and honest discussion of limitations.
+See [`report/report.md`](report/report.md) for the full technical report with detailed methodology, results analysis, and references.
 
 ## Requirements
 
 - Python 3.10+
-- PyTorch 2.0+
-- CUDA-capable GPU (tested on NVIDIA RTX 5090)
-
-```
-torch>=2.1.0
-torchvision>=0.16.0
-numpy>=1.24.0
-scipy>=1.11.0
-matplotlib>=3.7.0
-Pillow>=10.0.0
-lpips>=0.1.4
-pytorch-msssim>=1.0.0
-```
+- PyTorch 2.0+ with CUDA
+- See `requirements.txt` for full list
 
 ## References
 
-1. Bourtsoulatze et al., "Deep Joint Source-Channel Coding for Wireless Image Transmission," *IEEE TCCN*, 2019
-2. Shlezinger et al., "Model-Based Deep Learning: Key Approaches and Design Guidelines," *IEEE DSLW*, 2021
-3. Yang et al., "SwinJSCC: Taming Swin Transformer for Deep Joint Source-Channel Coding," *IEEE TCCN*, 2024
-4. Gastpar et al., "To Code or Not to Code: Lossy Source-Channel Communication Revisited," *IEEE TIT*, 2003
-5. Ho et al., "Denoising Diffusion Probabilistic Models," *NeurIPS*, 2020
-6. Song et al., "Denoising Diffusion Implicit Models," *ICLR*, 2021
-7. Floor & Ramstad, "Shannon-Kotel'nikov Mappings for Analog Point-to-Point Communications," *IEEE TIT*, 2024
+1. Bourtsoulatze et al. "Deep Joint Source-Channel Coding for Wireless Image Transmission" IEEE TCCN 2019
+2. Shlezinger et al. "Model-Based Deep Learning: Key Approaches and Design Guidelines" IEEE DSLW 2021
+3. Yang et al. "SwinJSCC: Taming Swin Transformer for Deep Joint Source-Channel Coding" IEEE TCCN 2024
+4. Gastpar et al. "To Code or Not to Code: Lossy Source-Channel Communication Revisited" IEEE TIT 2003
+5. Ho et al. "Denoising Diffusion Probabilistic Models" NeurIPS 2020
+6. Song et al. "Denoising Diffusion Implicit Models" ICLR 2021
+7. Floor & Ramstad "Shannon-Kotel'nikov Mappings for Analog Point-to-Point Communications" IEEE TIT 2024
 
 ## License
 
